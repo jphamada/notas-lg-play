@@ -2,8 +2,8 @@ name: Monitoreo YouTube
 
 on:
   schedule:
-    # Se ejecuta automáticamente cada 30 minutos
-    - cron: '*/30 * * * *'
+    # Lunes a viernes de 7:00 a 15:00 hs Argentina (10:00 a 18:00 UTC) cada 30 min
+    - cron: '0,30 10-18 * * 1-5'
   # Permite ejecutarlo manualmente en cualquier momento desde GitHub
   workflow_dispatch:
 
