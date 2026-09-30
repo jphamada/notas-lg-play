@@ -4,6 +4,7 @@ import requests
 import feedparser
 from bs4 import BeautifulSoup
 from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api.proxies import WebshareProxyConfig, GenericProxyConfig
 from google import genai
 from dotenv import load_dotenv
 
@@ -14,6 +15,7 @@ load_dotenv()
 # CONFIGURACIÓN
 # ==========================================
 CHANNEL_HANDLE = "@lagacetadetucuman"
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "UCowbI8idnvQTl2sFxkOvnKw")
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
@@ -69,14 +71,34 @@ def obtener_ultimo_video(channel_id):
         "link": entry.link
     }
 
+def obtener_ytt_api():
+    """Inicializa la API de transcripción configurando proxies si están presentes"""
+    webshare_user = os.environ.get("WEBSHARE_USER")
+    webshare_pass = os.environ.get("WEBSHARE_PASSWORD")
+    proxy_url = os.environ.get("PROXY_URL")
+
+    if webshare_user and webshare_pass:
+        print("[i] Usando proxy Webshare para evitar bloqueo de IP...")
+        proxy_config = WebshareProxyConfig(
+            proxy_username=webshare_user,
+            proxy_password=webshare_pass
+        )
+        return YouTubeTranscriptApi(proxy_config=proxy_config)
+    elif proxy_url:
+        print("[i] Usando proxy genérico...")
+        proxy_config = GenericProxyConfig(http_url=proxy_url, https_url=proxy_url)
+        return YouTubeTranscriptApi(proxy_config=proxy_config)
+    else:
+        return YouTubeTranscriptApi()
+
 def procesar_video(video_id, titulo):
     """Descarga transcripción, filtra por duración (<10 min) y genera la nota"""
     try:
-        if hasattr(YouTubeTranscriptApi, 'get_transcript'):
-            transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['es', 'es-419'])
-        else:
-            ytt = YouTubeTranscriptApi()
+        ytt = obtener_ytt_api()
+        if hasattr(ytt, 'fetch'):
             transcript_list = ytt.fetch(video_id, languages=['es', 'es-419'])
+        else:
+            transcript_list = ytt.get_transcript(video_id, languages=['es', 'es-419'])
     except Exception as e:
         print(f"[-] Sin transcripción disponible para '{titulo}' ({e})")
         return None
@@ -142,9 +164,13 @@ def enviar_a_slack(texto):
 # EJECUCIÓN
 # ==========================================
 if __name__ == "__main__":
-    print("[+] Obteniendo ID del canal...")
-    channel_id = obtener_channel_id(CHANNEL_HANDLE)
-    print(f"[+] Channel ID detectado: {channel_id}")
+    if CHANNEL_ID:
+        channel_id = CHANNEL_ID
+        print(f"[+] Usando Channel ID configurado: {channel_id}")
+    else:
+        print("[+] Obteniendo ID del canal...")
+        channel_id = obtener_channel_id(CHANNEL_HANDLE)
+        print(f"[+] Channel ID detectado: {channel_id}")
 
     video = obtener_ultimo_video(channel_id)
     if not video:
