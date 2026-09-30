@@ -1,5 +1,6 @@
 import os
 import re
+import datetime
 import requests
 import feedparser
 from bs4 import BeautifulSoup
@@ -58,18 +59,26 @@ def obtener_channel_id(handle):
         return meta['content']
     raise ValueError(f"No se pudo resolver el Channel ID para {handle}")
 
-def obtener_ultimo_video(channel_id):
-    """Lee el feed RSS público del canal y devuelve el último video publicado"""
+def obtener_ultimos_videos(channel_id, limite=15):
+    """Lee el feed RSS público del canal y calcula cuántos minutos pasaron desde la publicación de cada video"""
     rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
     feed = feedparser.parse(rss_url)
-    if not feed.entries:
-        return None
-    entry = feed.entries[0]
-    return {
-        "id": entry.yt_videoid,
-        "titulo": entry.title,
-        "link": entry.link
-    }
+    videos = []
+    ahora_utc = datetime.datetime.now(datetime.timezone.utc)
+    
+    for entry in feed.entries[:limite]:
+        minutos = 9999
+        if hasattr(entry, 'published_parsed') and entry.published_parsed:
+            pub_dt = datetime.datetime(*entry.published_parsed[:6], tzinfo=datetime.timezone.utc)
+            minutos = (ahora_utc - pub_dt).total_seconds() / 60
+        
+        videos.append({
+            "id": entry.yt_videoid,
+            "titulo": entry.title,
+            "link": entry.link,
+            "minutos_publicado": minutos
+        })
+    return videos
 
 def obtener_ytt_api():
     """Inicializa la API de transcripción configurando proxies si están presentes"""
@@ -101,11 +110,11 @@ def procesar_video(video_id, titulo):
             transcript_list = ytt.get_transcript(video_id, languages=['es', 'es-419'])
     except Exception as e:
         print(f"[-] Sin transcripción disponible para '{titulo}' ({e})")
-        return None
+        return None, "sin_transcripcion"
 
     if not transcript_list:
         print(f"[-] Transcripción vacía para '{titulo}'")
-        return None
+        return None, "sin_transcripcion"
 
     ultimo_fragmento = transcript_list[-1]
     start_fin = getattr(ultimo_fragmento, 'start', None) if hasattr(ultimo_fragmento, 'start') else ultimo_fragmento.get('start', 0)
@@ -115,7 +124,7 @@ def procesar_video(video_id, titulo):
     # Filtro estricto: máximo 10 minutos (600 segundos)
     if duracion_segundos > 600:
         print(f"[i] Ignorado por duración: '{titulo}' ({int(duracion_segundos // 60)}m {int(duracion_segundos % 60)}s)")
-        return None
+        return None, "excede_duracion"
 
     # Formatear transcripción con timecodes
     lineas_formateadas = []
@@ -128,30 +137,42 @@ def procesar_video(video_id, titulo):
 
     user_content = f"TÍTULO DEL VIDEO: {titulo}\nTRANSCRIPCIÓN:\n{texto_con_tiempos}"
 
-    # Llamada al SDK oficial de Gemini
-    response = client.models.generate_content(
-        model="gemini-3.5-flash-lite",
-        contents=user_content,
-        config=genai.types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
-            temperature=0.2, # Baja temperatura para máxima fidelidad fáctica
+    # Llamada al SDK oficial de Gemini con captura de errores temporales (ej. 503 / cuota)
+    try:
+        response = client.models.generate_content(
+            model="gemini-3.5-flash-lite",
+            contents=user_content,
+            config=genai.types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                temperature=0.2, # Baja temperatura para máxima fidelidad fáctica
+            )
         )
-    )
-    return response.text
+        return response.text, "ok"
+    except Exception as e:
+        print(f"[-] Error al generar nota con Gemini ({e})")
+        return None, "error_gemini"
 
+PROCESADOS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "videos_procesados.txt")
 ULTIMO_VIDEO_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ultimo_video.txt")
 
-def leer_ultimo_video_id():
-    """Lee el ID del último video procesado"""
-    if os.path.exists(ULTIMO_VIDEO_FILE):
-        with open(ULTIMO_VIDEO_FILE, "r", encoding="utf-8") as f:
-            return f.read().strip()
-    return ""
+def leer_videos_procesados():
+    """Lee los IDs de videos ya procesados o evaluados"""
+    procesados = set()
+    for ruta in [PROCESADOS_FILE, ULTIMO_VIDEO_FILE]:
+        if os.path.exists(ruta):
+            with open(ruta, "r", encoding="utf-8") as f:
+                for linea in f:
+                    v_id = linea.strip()
+                    if v_id:
+                        procesados.add(v_id)
+    return procesados
 
-def guardar_ultimo_video_id(video_id):
-    """Guarda el ID del último video procesado para evitar duplicados"""
+def marcar_video_procesado(video_id):
+    """Registra el ID del video procesado para no volver a evaluarlo"""
+    with open(PROCESADOS_FILE, "a", encoding="utf-8") as f:
+        f.write(f"{video_id.strip()}\n")
     with open(ULTIMO_VIDEO_FILE, "w", encoding="utf-8") as f:
-        f.write(video_id.strip())
+        f.write(f"{video_id.strip()}\n")
 
 def enviar_a_slack(texto):
     r = requests.post(SLACK_WEBHOOK_URL, json={"text": texto})
@@ -172,22 +193,47 @@ if __name__ == "__main__":
         channel_id = obtener_channel_id(CHANNEL_HANDLE)
         print(f"[+] Channel ID detectado: {channel_id}")
 
-    video = obtener_ultimo_video(channel_id)
-    if not video:
-        print("[-] No se encontraron videos publicados en el canal.")
+    videos = obtener_ultimos_videos(channel_id, limite=15)
+    if not videos:
+        print("[-] No se encontraron videos en el canal.")
     else:
-        ultimo_procesado = leer_ultimo_video_id()
-        if video["id"] == ultimo_procesado:
-            print(f"[i] El video '{video['titulo']}' (ID: {video['id']}) ya fue procesado anteriormente. No hay novedades.")
-        else:
-            print(f"\n[+] Nuevo video detectado: {video['titulo']} ({video['link']})")
-            nota_periodistica = procesar_video(video["id"], video["titulo"])
-            
-            if nota_periodistica:
-                mensaje_slack = f"{nota_periodistica}\n\nEnlace al video original: {video['link']}"
+        procesados = leer_videos_procesados()
+        video_procesado_exito = False
+
+        for v in videos:
+            v_id = v["id"]
+            v_titulo = v["titulo"]
+            v_minutos = v["minutos_publicado"]
+
+            if v_id in procesados:
+                print(f"[i] Ya evaluado/procesado previamente: '{v_titulo}'")
+                continue
+
+            # Si el video tiene menos de 30 minutos desde su publicación, YouTube suele demorar en generar subtítulos.
+            # Se pospone para la siguiente ejecución y se continúa buscando un video anterior.
+            if v_minutos < 30:
+                print(f"[i] Video muy reciente ({int(v_minutos)} min de publicado): '{v_titulo}'. Esperando transcripción (>=30 min). Buscando video anterior...")
+                continue
+
+            print(f"\n[+] Evaluando video candidato ({int(v_minutos)} min de publicado): '{v_titulo}' ({v['link']})")
+            nota, estado = procesar_video(v_id, v_titulo)
+
+            if estado == "ok" and nota:
+                mensaje_slack = f"{nota}\n\nEnlace al video original: {v['link']}"
                 if enviar_a_slack(mensaje_slack):
-                    guardar_ultimo_video_id(video["id"])
+                    marcar_video_procesado(v_id)
                     print("[OK] Nota generada y enviada a Slack exitosamente.")
-            else:
-                guardar_ultimo_video_id(video["id"])
-                print("[-] No se pudo procesar el video (sin transcripción o supera 10 min). Marcado como evaluado.")
+                    video_procesado_exito = True
+                    break
+            elif estado == "excede_duracion":
+                marcar_video_procesado(v_id)
+                print("[i] Marcado como evaluado (supera 10 min de duración). Continuando con el video anterior...")
+            elif estado == "sin_transcripcion":
+                if v_minutos >= 120:
+                    marcar_video_procesado(v_id)
+                    print("[i] Descartado definitivamente (más de 2 horas sin transcripción). Continuando con el video anterior...")
+                else:
+                    print("[i] Aún sin transcripción disponible. Se reintentará en la siguiente ejecución. Continuando con el video anterior...")
+
+        if not video_procesado_exito:
+            print("\n[i] No hubo videos nuevos listos para procesar en esta ejecución.")
