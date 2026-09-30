@@ -152,27 +152,38 @@ def procesar_video(video_id, titulo):
         print(f"[-] Error al generar nota con Gemini ({e})")
         return None, "error_gemini"
 
-PROCESADOS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "videos_procesados.txt")
 ULTIMO_VIDEO_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ultimo_video.txt")
 
 def leer_videos_procesados():
-    """Lee los IDs de videos ya procesados o evaluados"""
-    procesados = set()
-    for ruta in [PROCESADOS_FILE, ULTIMO_VIDEO_FILE]:
-        if os.path.exists(ruta):
-            with open(ruta, "r", encoding="utf-8") as f:
-                for linea in f:
-                    v_id = linea.strip()
-                    if v_id:
-                        procesados.add(v_id)
-    return procesados
+    """Lee el registro de videos ya procesados desde ultimo_video.txt"""
+    if not os.path.exists(ULTIMO_VIDEO_FILE):
+        return set()
+    with open(ULTIMO_VIDEO_FILE, "r", encoding="utf-8") as f:
+        return set(linea.strip() for linea in f if linea.strip())
 
 def marcar_video_procesado(video_id):
-    """Registra el ID del video procesado para no volver a evaluarlo"""
-    with open(PROCESADOS_FILE, "a", encoding="utf-8") as f:
-        f.write(f"{video_id.strip()}\n")
+    """Guarda el nuevo ID en el historial de ultimo_video.txt manteniendo los últimos 30 videos"""
+    video_id = video_id.strip()
+    if not video_id:
+        return
+
+    ids_existentes = []
+    if os.path.exists(ULTIMO_VIDEO_FILE):
+        with open(ULTIMO_VIDEO_FILE, "r", encoding="utf-8") as f:
+            for linea in f:
+                v = linea.strip()
+                if v and v not in ids_existentes:
+                    ids_existentes.append(v)
+
+    if video_id in ids_existentes:
+        ids_existentes.remove(video_id)
+    ids_existentes.append(video_id)
+
+    # Conservar los últimos 30 videos procesados
+    ultimos = ids_existentes[-30:]
     with open(ULTIMO_VIDEO_FILE, "w", encoding="utf-8") as f:
-        f.write(f"{video_id.strip()}\n")
+        for vid in ultimos:
+            f.write(f"{vid}\n")
 
 def enviar_a_slack(texto):
     r = requests.post(SLACK_WEBHOOK_URL, json={"text": texto})
