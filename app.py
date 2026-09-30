@@ -60,25 +60,13 @@ def obtener_channel_id(handle):
     raise ValueError(f"No se pudo resolver el Channel ID para {handle}")
 
 def obtener_ultimos_videos(channel_id, limite=15):
-    """Lee el feed RSS público del canal y calcula cuántos minutos pasaron desde la publicación de cada video"""
+    """Lee los últimos videos del canal ordenados del más reciente al más antiguo"""
     rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
     feed = feedparser.parse(rss_url)
-    videos = []
-    ahora_utc = datetime.datetime.now(datetime.timezone.utc)
-    
-    for entry in feed.entries[:limite]:
-        minutos = 9999
-        if hasattr(entry, 'published_parsed') and entry.published_parsed:
-            pub_dt = datetime.datetime(*entry.published_parsed[:6], tzinfo=datetime.timezone.utc)
-            minutos = (ahora_utc - pub_dt).total_seconds() / 60
-        
-        videos.append({
-            "id": entry.yt_videoid,
-            "titulo": entry.title,
-            "link": entry.link,
-            "minutos_publicado": minutos
-        })
-    return videos
+    return [
+        {"id": entry.yt_videoid, "titulo": entry.title, "link": entry.link}
+        for entry in feed.entries[:limite]
+    ]
 
 def obtener_ytt_api():
     """Inicializa la API de transcripción configurando proxies si están presentes"""
@@ -209,42 +197,36 @@ if __name__ == "__main__":
         print("[-] No se encontraron videos en el canal.")
     else:
         procesados = leer_videos_procesados()
-        video_procesado_exito = False
+        video_enviado = False
 
         for v in videos:
             v_id = v["id"]
             v_titulo = v["titulo"]
-            v_minutos = v["minutos_publicado"]
 
+            # 1. Si ya se procesó o evaluó previamente, ignorar
             if v_id in procesados:
-                print(f"[i] Ya evaluado/procesado previamente: '{v_titulo}'")
                 continue
 
-            # Si el video tiene menos de 30 minutos desde su publicación, YouTube suele demorar en generar subtítulos.
-            # Se pospone para la siguiente ejecución y se continúa buscando un video anterior.
-            if v_minutos < 30:
-                print(f"[i] Video muy reciente ({int(v_minutos)} min de publicado): '{v_titulo}'. Esperando transcripción (>=30 min). Buscando video anterior...")
-                continue
-
-            print(f"\n[+] Evaluando video candidato ({int(v_minutos)} min de publicado): '{v_titulo}' ({v['link']})")
+            print(f"\n[+] Verificando video: '{v_titulo}' ({v['link']})")
             nota, estado = procesar_video(v_id, v_titulo)
 
+            # 2. Si tiene transcripción y dura <= 10 min: enviar a Slack y terminar
             if estado == "ok" and nota:
                 mensaje_slack = f"{nota}\n\nEnlace al video original: {v['link']}"
                 if enviar_a_slack(mensaje_slack):
                     marcar_video_procesado(v_id)
                     print("[OK] Nota generada y enviada a Slack exitosamente.")
-                    video_procesado_exito = True
+                    video_enviado = True
                     break
+
+            # 3. Si supera los 10 minutos: descartar permanentemente y seguir con el anterior
             elif estado == "excede_duracion":
                 marcar_video_procesado(v_id)
-                print("[i] Marcado como evaluado (supera 10 min de duración). Continuando con el video anterior...")
-            elif estado == "sin_transcripcion":
-                if v_minutos >= 120:
-                    marcar_video_procesado(v_id)
-                    print("[i] Descartado definitivamente (más de 2 horas sin transcripción). Continuando con el video anterior...")
-                else:
-                    print("[i] Aún sin transcripción disponible. Se reintentará en la siguiente ejecución. Continuando con el video anterior...")
+                print("[i] Supera los 10 min de duración. Marcado como evaluado. Buscando video anterior...")
 
-        if not video_procesado_exito:
+            # 4. Si aún no tiene subtítulos disponibles: buscar el anterior sin marcar este en procesados
+            elif estado == "sin_transcripcion":
+                print("[i] Sin subtítulos listos todavía. Buscando video anterior...")
+
+        if not video_enviado:
             print("\n[i] No hubo videos nuevos listos para procesar en esta ejecución.")
