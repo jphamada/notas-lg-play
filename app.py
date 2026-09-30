@@ -17,6 +17,8 @@ load_dotenv()
 # ==========================================
 CHANNEL_HANDLE = "@lagacetadetucuman"
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "UCowbI8idnvQTl2sFxkOvnKw")
+MAX_DURACION_MINUTOS = 15
+MAX_DURACION_SEGUNDOS = MAX_DURACION_MINUTOS * 60
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
@@ -109,9 +111,9 @@ def procesar_video(video_id, titulo):
     duration_fin = getattr(ultimo_fragmento, 'duration', None) if hasattr(ultimo_fragmento, 'duration') else ultimo_fragmento.get('duration', 0)
     duracion_segundos = start_fin + duration_fin
     
-    # Filtro estricto: máximo 10 minutos (600 segundos)
-    if duracion_segundos > 600:
-        print(f"[i] Ignorado por duración: '{titulo}' ({int(duracion_segundos // 60)}m {int(duracion_segundos % 60)}s)")
+    # Filtro: máximo 15 minutos
+    if duracion_segundos > MAX_DURACION_SEGUNDOS:
+        print(f"[i] Ignorado por duración: '{titulo}' ({int(duracion_segundos // 60)}m {int(duracion_segundos % 60)}s > {MAX_DURACION_MINUTOS}m)")
         return None, "excede_duracion"
 
     # Formatear transcripción con timecodes
@@ -210,7 +212,7 @@ if __name__ == "__main__":
             print(f"\n[+] Verificando video: '{v_titulo}' ({v['link']})")
             nota, estado = procesar_video(v_id, v_titulo)
 
-            # 2. Si tiene transcripción y dura <= 10 min: enviar a Slack y terminar
+            # 2. Si tiene transcripción y dura <= 15 min: enviar a Slack y terminar
             if estado == "ok" and nota:
                 mensaje_slack = f"{nota}\n\nEnlace al video original: {v['link']}"
                 if enviar_a_slack(mensaje_slack):
@@ -219,10 +221,10 @@ if __name__ == "__main__":
                     video_enviado = True
                     break
 
-            # 3. Si supera los 10 minutos: descartar permanentemente y seguir con el anterior
+            # 3. Si supera los 15 minutos: descartar permanentemente y seguir con el anterior
             elif estado == "excede_duracion":
                 marcar_video_procesado(v_id)
-                print("[i] Supera los 10 min de duración. Marcado como evaluado. Buscando video anterior...")
+                print(f"[i] Supera los {MAX_DURACION_MINUTOS} min de duración. Marcado como evaluado. Buscando video anterior...")
 
             # 4. Si aún no tiene subtítulos disponibles: buscar el anterior sin marcar este en procesados
             elif estado == "sin_transcripcion":
